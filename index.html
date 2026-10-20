@@ -96,7 +96,7 @@
   <!-- ==============================================================================
        2. 地址查詢列與標竿工廠快選區 (Search Bar & Preset Factories)
        ============================================================================== -->
-  <section class="border-b border-slate-800/80 bg-slate-900/60 px-4 lg:px-6 py-3">
+  <section class="border-b border-slate-800/80 bg-slate-900/60 px-4 lg:px-6 py-3 relative z-20">
     <div class="max-w-7xl mx-auto space-y-2.5">
       
       <!-- 主搜尋欄位 -->
@@ -161,8 +161,9 @@
 
   <!-- ==============================================================================
        3. 核心雙欄工作區：左側高解析互動地圖 ✕ 右側盡職調查診斷面板
+       ★ 關鍵修正：加入 relative z-10 限制內部 Leaflet controls 的層級堆疊上下文！
        ============================================================================== -->
-  <main class="max-w-7xl mx-auto w-full px-4 lg:px-6 py-4 flex-1 grid grid-cols-1 lg:grid-cols-12 gap-5">
+  <main class="relative z-10 max-w-7xl mx-auto w-full px-4 lg:px-6 py-4 flex-1 grid grid-cols-1 lg:grid-cols-12 gap-5">
     
     <!-- 左側與中央：高解析地圖與時光機視窗 (7 欄) -->
     <div class="lg:col-span-7 flex flex-col gap-3">
@@ -191,7 +192,7 @@
 
           <!-- 地圖互動輔助：滾輪鎖定開關 ＆ 全螢幕 -->
           <div class="pointer-events-auto flex items-center gap-1 bg-slate-900/95 backdrop-blur-md px-2 py-1 rounded-xl border border-slate-700/80 shadow-lg text-[11px]">
-            <!-- 滾輪縮放切換按鈕 (解決滾輪被地圖卡住問題) -->
+            <!-- 滾輪縮放切換按鈕 -->
             <button onclick="toggleScrollWheelZoom()" id="btnWheelToggle" class="px-2 py-1 rounded-lg font-medium transition text-slate-300 hover:text-white flex items-center gap-1" title="切換滑鼠滾輪是縮放地圖還是滾動網頁">
               <i data-lucide="mouse-pointer" class="w-3.5 h-3.5 text-cyan-400"></i>
               <span id="wheelToggleText">滾輪滾動頁面</span>
@@ -456,11 +457,12 @@
 
   <!-- ==============================================================================
        4. 彈窗與抽屜 (Modals & Drawers)
+       ★ 關鍵修正：套用 .modal-overlay 與 z-[99999]，徹底杜絕被 Leaflet 地圖穿透覆蓋！
        ============================================================================== -->
 
   <!-- Modal 1: 查詢歷程紀錄抽屜 (Query Logs Drawer) -->
-  <div id="historyDrawer" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm hidden flex justify-end transition-opacity">
-    <div class="w-full max-w-md bg-slate-900 border-l border-slate-800 h-full p-5 flex flex-col shadow-2xl">
+  <div id="historyDrawer" onclick="handleBackdropClick(event, 'historyDrawer')" class="modal-overlay fixed inset-0 z-[99999] bg-slate-950/80 backdrop-blur-sm hidden flex justify-end transition-opacity">
+    <div class="w-full max-w-md bg-slate-900 border-l border-slate-800 h-full p-5 flex flex-col shadow-2xl" onclick="event.stopPropagation()">
       <div class="flex items-center justify-between pb-4 border-b border-slate-800">
         <div class="flex items-center gap-2">
           <i data-lucide="database" class="w-5 h-5 text-emerald-400"></i>
@@ -492,8 +494,8 @@
   </div>
 
   <!-- Modal 2: Supabase BaaS 雲端設定視窗 (Supabase Settings Modal) -->
-  <div id="supabaseModal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
-    <div class="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-4">
+  <div id="supabaseModal" onclick="handleBackdropClick(event, 'supabaseModal')" class="modal-overlay fixed inset-0 z-[99999] bg-slate-950/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="w-full max-w-lg bg-slate-900 border border-slate-700/80 rounded-2xl p-6 shadow-2xl space-y-4 relative z-10" onclick="event.stopPropagation()">
       <div class="flex items-center justify-between pb-3 border-b border-slate-800">
         <div class="flex items-center gap-2.5">
           <div class="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
@@ -504,7 +506,7 @@
             <p class="text-xs text-slate-400">遵循 github-supabase-web 規範：純前端僅需輸入公開 anon key</p>
           </div>
         </div>
-        <button onclick="closeSupabaseModal()" class="text-slate-400 hover:text-white">
+        <button onclick="closeSupabaseModal()" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
@@ -558,14 +560,14 @@
   </div>
 
   <!-- Modal 3: 工業區落塵量開放資料查詢指南彈窗 (Guide Modal) -->
-  <div id="guideModal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
-    <div class="w-full max-w-3xl bg-slate-900 border border-slate-800 rounded-2xl max-h-[85vh] flex flex-col shadow-2xl">
+  <div id="guideModal" onclick="handleBackdropClick(event, 'guideModal')" class="modal-overlay fixed inset-0 z-[99999] bg-slate-950/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="w-full max-w-3xl bg-slate-900 border border-slate-700/80 rounded-2xl max-h-[85vh] flex flex-col shadow-2xl relative z-10" onclick="event.stopPropagation()">
       <div class="flex items-center justify-between p-5 border-b border-slate-800">
         <div class="flex items-center gap-2.5">
           <i data-lucide="book-open" class="w-5 h-5 text-emerald-400"></i>
           <h3 class="font-bold text-white text-base">工業區落塵量開放資料查詢指南操作手冊</h3>
         </div>
-        <button onclick="closeGuideModal()" class="text-slate-400 hover:text-white">
+        <button onclick="closeGuideModal()" class="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
@@ -626,7 +628,7 @@
   </div>
 
   <!-- 頁尾 -->
-  <footer class="border-t border-slate-900 bg-slate-950 py-3 px-4 text-center text-xs text-slate-500">
+  <footer class="border-t border-slate-900 bg-slate-950 py-3 px-4 text-center text-xs text-slate-500 relative z-20">
     <p>臺灣工廠屋頂落塵量與污染熱區盡職調查系統 ｜ 整合 Google 混合衛星 ✕ 內政部國土測繪雲 (PHOTO2/EMAP) ✕ OpenStreetMap ✕ Supabase BaaS</p>
   </footer>
 

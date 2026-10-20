@@ -83,6 +83,13 @@ code, pre, .font-mono {
   animation: pinBounce 2s infinite ease-in-out;
 }
 
+/* ★ 全域彈窗與抽屜層級 (最高層級，徹底防止 Leaflet 地圖穿透與覆蓋) */
+.modal-overlay {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 99999 !important;
+}
+
 /* 地圖全螢幕樣式 */
 .map-fullscreen {
   position: fixed !important;
@@ -92,7 +99,7 @@ code, pre, .font-mono {
   bottom: 0 !important;
   width: 100vw !important;
   height: 100vh !important;
-  z-index: 9999 !important;
+  z-index: 9990 !important;
   border-radius: 0 !important;
 }
 

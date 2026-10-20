@@ -1228,6 +1228,23 @@ function closeGuideModal() {
   document.getElementById('guideModal').classList.add('hidden');
 }
 
+// 點擊彈窗遮罩灰色背景自動關閉
+function handleBackdropClick(event, modalId) {
+  if (event.target.id === modalId) {
+    const el = document.getElementById(modalId);
+    if (el) el.classList.add('hidden');
+  }
+}
+
+// 支援鍵盤 Escape 鍵關閉所有彈窗
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeSupabaseModal();
+    closeGuideModal();
+    closeHistoryDrawer();
+  }
+});
+
 // 列印盡職調查報告
 function printDueDiligenceReport() {
   if (!currentFactory) {
