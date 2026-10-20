@@ -16,11 +16,15 @@
   --accent-rose: #f43f5e;
 }
 
-body {
+html, body {
   font-family: 'Inter', 'Noto Sans TC', sans-serif;
   background-color: var(--bg-main);
   color: #f1f5f9;
   overflow-x: hidden;
+  overflow-y: auto !important;
+  scroll-behavior: smooth;
+  height: auto;
+  min-height: 100vh;
 }
 
 code, pre, .font-mono {
@@ -47,6 +51,7 @@ code, pre, .font-mono {
 .leaflet-container {
   background-color: #0b1120 !important;
   font-family: inherit;
+  cursor: crosshair;
 }
 .leaflet-popup-content-wrapper {
   background-color: #1e293b !important;
@@ -69,42 +74,26 @@ code, pre, .font-mono {
   animation: pulseGlow 2.5s infinite ease-in-out;
 }
 
-/* Before / After 捲動分屏滑桿 */
-.split-slider-container {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 500;
+/* 廠房中心點標記動畫 */
+@keyframes pinBounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
 }
-.split-slider-line {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background-color: #38bdf8;
-  box-shadow: 0 0 12px rgba(56, 189, 248, 0.8);
-  pointer-events: auto;
-  cursor: ew-resize;
+.pin-bounce {
+  animation: pinBounce 2s infinite ease-in-out;
 }
-.split-slider-handle {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background: #0284c7;
-  border: 2px solid #ffffff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #ffffff;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
-  cursor: ew-resize;
+
+/* 地圖全螢幕樣式 */
+.map-fullscreen {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 9999 !important;
+  border-radius: 0 !important;
 }
 
 /* 玻璃擬態 */

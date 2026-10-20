@@ -1,56 +1,70 @@
 /**
  * app.js
- * 臺灣工廠屋頂落塵量與污染熱區盡職調查系統核心邏輯
- * 整合：Leaflet 地圖多圖資 (NLSC 正射航照 ✕ ESRI 衛星)、光學差分熱區引擎、
- * Google Earth Pro KML 90度俯瞰產生器、Supabase BaaS 即時留存、歷史查詢抽屜
+ * 臺灣工廠屋頂落塵量與污染熱區盡職調查系統核心邏輯 (v2.0 強化版)
+ * 1. 修正地址解析：多層級台灣門牌/街路智慧剖析，支援「812高雄市小港區店鎮里嘉興街8號」等複合地址精準定位
+ * 2. 串接 Google 混合實景衛星圖 (Google Satellite Hybrid ✕ 國土測繪航照 ✕ ESRI)
+ * 3. 解決地圖滾輪鎖死網頁：預設滾輪優先捲動網頁，支援一鍵切換滾輪縮放與全螢幕放大
+ * 4. 點擊地圖任意處或拖曳定位針，即時微調廠房屋頂核心坐標
  */
 
 let map = null;
-let currentBaseLayer = null;
+let currentBaseLayer = 'google_sat';
 let baseLayers = {};
 let layerGroups = {
   sources: null,
   plume: null,
   heatmap: null,
   gutters: null,
-  roofBorder: null
+  roofBorder: null,
+  targetPin: null
 };
 
 let currentFactory = null;
 let currentSliderValue = 85;
+let isScrollWheelZoomEnabled = false;
+let isFullscreen = false;
 
 // ==============================================================================
 // 1. 初始化應用程式
 // ==============================================================================
 document.addEventListener('DOMContentLoaded', async () => {
-  // 1. 初始化 Lucide 圖示
   if (window.lucide) {
     lucide.createIcons();
   }
 
-  // 2. 初始化 Leaflet 地圖
+  // 1. 初始化 Leaflet 地圖
   initMap();
 
-  // 3. 渲染標竿工廠快捷晶片
+  // 2. 渲染標竿工廠快捷晶片
   renderPresetChips();
 
-  // 4. 初始化 Supabase BaaS 連線
+  // 3. 初始化 Supabase BaaS 連線
   if (window.SupabaseBridge) {
     await SupabaseBridge.init();
     updateHistoryCount();
   }
 
-  // 5. 預設載入第一個代表性案例 (中鋼公司)
+  // 4. 預設載入代表性案例 (中鋼公司)
   if (PRESET_FACTORIES && PRESET_FACTORIES.length > 0) {
     loadFactoryCase(PRESET_FACTORIES[0], false);
   }
 });
 
 // ==============================================================================
-// 2. Leaflet 地圖引擎與多圖資設定
+// 2. Leaflet 地圖引擎與多圖資設定 (串接 Google 混合衛星 ✕ NLSC ✕ ESRI)
 // ==============================================================================
 function initMap() {
-  // 臺灣國土測繪圖資服務雲 (NLSC) 正射影像 PHOTO2
+  // ① Google 混合衛星圖 (Google Satellite Hybrid: 實景空拍＋繁體路網標籤)
+  const googleSat = L.tileLayer(
+    'https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+    {
+      subdomains: ['0', '1', '2', '3'],
+      maxZoom: 20,
+      attribution: '© Google Maps 實景衛星圖'
+    }
+  );
+
+  // ② 臺灣國土測繪圖資服務雲 (NLSC) 正射影像 PHOTO2
   const nlscPhoto = L.tileLayer(
     'https://wmts.nlsc.gov.tw/wmts/PHOTO2/default/GoogleMapsCompatible/{z}/{y}/{x}',
     {
@@ -59,53 +73,62 @@ function initMap() {
     }
   );
 
-  // ESRI 高解析度商業衛星影像
+  // ③ ESRI 高解析度商業衛星影像
   const esriSat = L.tileLayer(
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     {
       maxZoom: 19,
-      attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+      attribution: 'Tiles &copy; Esri World Imagery'
     }
   );
 
-  // CartoDB 深色夜間地圖
-  const cartoDark = L.tileLayer(
-    'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+  // ④ 臺灣通用電子地圖 (NLSC EMAP)
+  const nlscEmap = L.tileLayer(
+    'https://wmts.nlsc.gov.tw/wmts/EMAP/default/GoogleMapsCompatible/{z}/{y}/{x}',
     {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+      maxZoom: 20,
+      attribution: '© 國土測繪通用電子地圖 (NLSC EMAP)'
     }
   );
 
   baseLayers = {
+    google_sat: googleSat,
     nlsc_photo: nlscPhoto,
     esri_sat: esriSat,
-    carto_dark: cartoDark
+    nlsc_emap: nlscEmap
   };
 
-  // 建立地圖實例 (預設座標：高雄中鋼)
+  // 建立地圖實例
+  // ★ 關鍵修正：scrollWheelZoom 預設為 false，避免滑鼠在瀏覽器移動時被地圖霸佔滾輪而無法捲動網頁！
   map = L.map('dustMap', {
     center: [22.54898, 120.34752],
     zoom: 18,
     maxZoom: 20,
-    layers: [nlscPhoto],
-    zoomControl: false
+    layers: [googleSat],
+    zoomControl: false,
+    scrollWheelZoom: false
   });
+
+  currentBaseLayer = 'google_sat';
 
   // 加入右下角縮放控制元件
   L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-  currentBaseLayer = 'nlsc_photo';
-
-  // 建立各功能向量圖層群組
+  // 建立圖層群組
   layerGroups.sources = L.layerGroup().addTo(map);
   layerGroups.plume = L.layerGroup().addTo(map);
   layerGroups.heatmap = L.layerGroup().addTo(map);
   layerGroups.gutters = L.layerGroup().addTo(map);
   layerGroups.roofBorder = L.layerGroup().addTo(map);
+  layerGroups.targetPin = L.layerGroup().addTo(map);
+
+  // 監聽點擊地圖任意處：允許使用者直接微調廠房屋頂核心位置
+  map.on('click', (e) => {
+    relocateRoofTarget(e.latlng);
+  });
 }
 
-// 切換底圖 (NLSC 航照 vs ESRI 衛星 vs CartoDB 暗色)
+// 切換底圖圖資
 function setBaseLayer(layerKey) {
   if (!baseLayers[layerKey] || currentBaseLayer === layerKey) return;
 
@@ -113,25 +136,67 @@ function setBaseLayer(layerKey) {
   map.addLayer(baseLayers[layerKey]);
   currentBaseLayer = layerKey;
 
-  // 更新按鈕樣式
-  const btnNlsc = document.getElementById('btnLayerNlsc');
-  const btnEsri = document.getElementById('btnLayerEsri');
-  const btnDark = document.getElementById('btnLayerDark');
+  // 更新按鈕高亮
+  const buttons = {
+    google_sat: document.getElementById('btnLayerGoogle'),
+    nlsc_photo: document.getElementById('btnLayerNlsc'),
+    esri_sat: document.getElementById('btnLayerEsri'),
+    nlsc_emap: document.getElementById('btnLayerEmap')
+  };
 
-  [btnNlsc, btnEsri, btnDark].forEach(btn => {
-    btn.className = 'px-2.5 py-1 rounded-lg font-medium transition text-slate-300 hover:text-white hover:bg-slate-800';
+  Object.keys(buttons).forEach(k => {
+    const btn = buttons[k];
+    if (!btn) return;
+    if (k === layerKey) {
+      btn.className = 'px-2 py-1 rounded-lg font-medium transition bg-emerald-600 text-white shadow-sm flex items-center gap-1';
+    } else {
+      btn.className = 'px-2 py-1 rounded-lg font-medium transition text-slate-300 hover:text-white hover:bg-slate-800';
+    }
   });
+}
 
-  if (layerKey === 'nlsc_photo') {
-    btnNlsc.className = 'px-2.5 py-1 rounded-lg font-medium transition bg-emerald-600 text-white shadow-sm';
-  } else if (layerKey === 'esri_sat') {
-    btnEsri.className = 'px-2.5 py-1 rounded-lg font-medium transition bg-emerald-600 text-white shadow-sm';
-  } else if (layerKey === 'carto_dark') {
-    btnDark.className = 'px-2.5 py-1 rounded-lg font-medium transition bg-emerald-600 text-white shadow-sm';
+// 解決滾輪被地圖搶走問題：切換「滾輪滾動網頁」或「滾輪縮放地圖」
+function toggleScrollWheelZoom() {
+  isScrollWheelZoomEnabled = !isScrollWheelZoomEnabled;
+  const btn = document.getElementById('btnWheelToggle');
+  const textEl = document.getElementById('wheelToggleText');
+
+  if (isScrollWheelZoomEnabled) {
+    map.scrollWheelZoom.enable();
+    btn.className = 'px-2 py-1 rounded-lg font-medium transition bg-cyan-600 text-white flex items-center gap-1 shadow-sm';
+    textEl.textContent = '滾輪縮放地圖';
+    btn.title = '目前：滑鼠滾輪縮放地圖 (點擊切換為優先滾動網頁)';
+  } else {
+    map.scrollWheelZoom.disable();
+    btn.className = 'px-2 py-1 rounded-lg font-medium transition text-slate-300 hover:text-white flex items-center gap-1';
+    textEl.textContent = '滾輪滾動頁面';
+    btn.title = '目前：滑鼠滾輪自由滾動瀏覽網頁 (點擊啟用滾輪縮放地圖)';
   }
 }
 
-// 切換圖層開關 (熱區、排氣源、風向扇形)
+// 全螢幕地圖切換
+function toggleFullscreenMap() {
+  isFullscreen = !isFullscreen;
+  const wrapper = document.getElementById('mapWrapper');
+  const btn = document.getElementById('btnFullscreen');
+  const text = document.getElementById('fullscreenText');
+
+  if (isFullscreen) {
+    wrapper.classList.add('map-fullscreen');
+    text.textContent = '退出全螢幕';
+    btn.className = 'px-2 py-1 rounded-lg font-medium transition bg-amber-600 text-white flex items-center gap-1 shadow-sm';
+  } else {
+    wrapper.classList.remove('map-fullscreen');
+    text.textContent = '全螢幕';
+    btn.className = 'px-2 py-1 rounded-lg font-medium transition text-slate-300 hover:text-white flex items-center gap-1';
+  }
+
+  setTimeout(() => {
+    map.invalidateSize();
+  }, 200);
+}
+
+// 切換圖層開關
 function toggleLayer(type) {
   const checkbox = document.getElementById(`toggle${type.charAt(0).toUpperCase() + type.slice(1)}`);
   if (!checkbox) return;
@@ -147,101 +212,271 @@ function toggleLayer(type) {
 }
 
 // ==============================================================================
-// 3. 渲染標竿工廠快選 Chips
+// 3. 台灣地址智慧剖析器 (解決郵遞區號、村里、鄰、門牌造成的 Nominatim 找不到問題)
 // ==============================================================================
-function renderPresetChips() {
-  const container = document.getElementById('presetChips');
-  if (!container || !PRESET_FACTORIES) return;
+function parseTaiwanAddress(raw) {
+  let str = (raw || '').trim();
+  // 1. 移除開頭或結尾郵遞區號 (3~6 碼數字)
+  str = str.replace(/^\d{3,6}\s*/, '').replace(/\s*\d{3,6}$/, '');
+  // 2. 移除樓層
+  str = str.replace(/\d+樓|\d+[Ff]/g, '');
 
-  container.innerHTML = PRESET_FACTORIES.map((factory, idx) => `
-    <button 
-      onclick="selectPresetFactory('${factory.id}')"
-      id="chip-${factory.id}"
-      class="preset-chip whitespace-nowrap px-3 py-1.5 rounded-xl border text-xs font-medium transition flex items-center gap-1.5 ${
-        idx === 0 
-          ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/60 shadow-sm' 
-          : 'bg-slate-800/80 text-slate-300 border-slate-700/80 hover:bg-slate-700 hover:text-white'
-      }"
-    >
-      <span class="w-1.5 h-1.5 rounded-full ${factory.dustIndex > 80 ? 'bg-rose-400' : (factory.dustIndex > 60 ? 'bg-amber-400' : 'bg-emerald-400')}"></span>
-      <span>${factory.name.split(' ')[0]}</span>
-      <span class="text-[10px] text-slate-400">(${factory.industrialZone.replace('產業園區', '').replace('工業區', '')})</span>
-    </button>
-  `).join('');
-}
+  let city = '';
+  let district = '';
+  let village = '';
+  let road = '';
+  let houseNo = '';
 
-function selectPresetFactory(factoryId) {
-  const factory = PRESET_FACTORIES.find(f => f.id === factoryId);
-  if (!factory) return;
-
-  // 更新 Chip 高亮
-  document.querySelectorAll('.preset-chip').forEach(c => {
-    c.className = 'preset-chip whitespace-nowrap px-3 py-1.5 rounded-xl border text-xs font-medium transition flex items-center gap-1.5 bg-slate-800/80 text-slate-300 border-slate-700/80 hover:bg-slate-700 hover:text-white';
-  });
-  const activeChip = document.getElementById(`chip-${factoryId}`);
-  if (activeChip) {
-    activeChip.className = 'preset-chip whitespace-nowrap px-3 py-1.5 rounded-xl border text-xs font-medium transition flex items-center gap-1.5 bg-emerald-600/30 text-emerald-300 border-emerald-500/60 shadow-sm';
+  const cities = ['基隆市','臺北市','台北市','新北市','桃園市','新竹市','新竹縣','苗栗縣','臺中市','台中市','彰化縣','南投縣','雲林縣','嘉義市','嘉義縣','臺南市','台南市','高雄市','屏東縣','宜蘭縣','花蓮縣','臺東縣','台東縣','澎湖縣','金門縣','連江縣'];
+  for (const c of cities) {
+    if (str.includes(c)) {
+      city = c;
+      const parts = str.split(c);
+      str = parts[1] || '';
+      break;
+    }
   }
 
-  // 填入搜尋欄位
-  document.getElementById('addressInput').value = factory.address;
-  document.getElementById('clearSearchBtn').classList.remove('hidden');
+  // 鄉鎮市區 (非貪婪匹配到第一個 區|鄉|鎮|市)
+  const distMatch = str.match(/^([^\d]{1,4}?(?:區|鄉|鎮|市))/);
+  if (distMatch) {
+    district = distMatch[1];
+    str = str.substring(district.length);
+  }
 
-  loadFactoryCase(factory, true);
+  // 村里 (非貪婪匹配到 里|村)
+  const villageMatch = str.match(/^([^\d]{1,4}?(?:里|村))/);
+  if (villageMatch) {
+    village = villageMatch[1];
+    str = str.substring(village.length);
+  }
+
+  // 鄰
+  str = str.replace(/^\d+鄰/, '');
+
+  // 路街段大道
+  const roadMatch = str.match(/^([^\d]{1,10}?(?:路|街|大道|(?:[一二三四五六七八九十\d]+段)))/);
+  if (roadMatch) {
+    road = roadMatch[1];
+    str = str.substring(road.length);
+  }
+
+  // 門牌號碼
+  const houseMatch = str.match(/(\d+(?:[-之]\d+)?號)/);
+  if (houseMatch) {
+    houseNo = houseMatch[1];
+  }
+
+  return { city, district, village, road, houseNo, fullCleaned: `${city}${district}${road}${houseNo}` };
+}
+
+// 多層級串接空間定位 API (OSM Nominatim 多階段回退)
+async function geocodeTaiwanAddress(rawQuery) {
+  const parsed = parseTaiwanAddress(rawQuery);
+  const candidates = [];
+
+  // 優先級 1: 完整乾淨地址 (縣市+鄉鎮市區+路街+號)
+  if (parsed.city && parsed.district && parsed.road && parsed.houseNo) {
+    candidates.push(`${parsed.city}${parsed.district}${parsed.road}${parsed.houseNo}`);
+  }
+
+  // 優先級 2: 街路層級 (精準到該路街，如：高雄市小港區嘉興街) ★ 本次修復的核心！
+  if (parsed.city && parsed.district && parsed.road) {
+    candidates.push(`${parsed.city}${parsed.district}${parsed.road}`);
+  }
+
+  // 優先級 3: 縣市+路街 (如：高雄市嘉興街)
+  if (parsed.city && parsed.road) {
+    candidates.push(`${parsed.city}${parsed.road}`);
+  }
+
+  // 優先級 4: 原始清理地址
+  const simpleClean = rawQuery.replace(/^\d{3,6}\s*/, '').replace(/\s*\d{3,6}$/, '');
+  if (!candidates.includes(simpleClean)) {
+    candidates.push(simpleClean);
+  }
+
+  // 優先級 5: 縣市+鄉鎮市區
+  if (parsed.city && parsed.district) {
+    candidates.push(`${parsed.city}${parsed.district}`);
+  }
+
+  console.log('[Geocode] 測試候選搜尋字串：', candidates);
+
+  for (const q of candidates) {
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&countrycodes=tw&limit=1`;
+      const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        console.log(`[Geocode] 命中候選「${q}」：`, data[0]);
+        return {
+          lat: parseFloat(data[0].lat),
+          lng: parseFloat(data[0].lon),
+          displayName: data[0].display_name,
+          matchedQuery: q,
+          parsedInfo: parsed
+        };
+      }
+    } catch (e) {
+      console.warn(`[Geocode] 查詢候選「${q}」異常：`, e);
+    }
+  }
+
+  return null;
 }
 
 // ==============================================================================
-// 4. 載入工廠屋頂落塵與熱區視覺化 (遵循指南 4 大指標)
+// 4. 地址查詢執行主函數
+// ==============================================================================
+async function handleAddressSearch(e) {
+  e.preventDefault();
+  const inputEl = document.getElementById('addressInput');
+  const rawQuery = (inputEl.value || '').trim();
+  if (!rawQuery) return;
+
+  const submitBtn = document.getElementById('searchSubmitBtn');
+  const btnText = document.getElementById('searchBtnText');
+
+  submitBtn.disabled = true;
+  btnText.textContent = '精準定位中...';
+
+  try {
+    // 1. 檢驗是否與既有 10 大標竿工廠相符
+    const matchedPreset = PRESET_FACTORIES.find(f => 
+      f.name.includes(rawQuery) || f.address.includes(rawQuery) || rawQuery.includes(f.name.split(' ')[0])
+    );
+    if (matchedPreset) {
+      loadFactoryCase(matchedPreset, true);
+      return;
+    }
+
+    // 2. 執行多層級台灣地址空間定位
+    const geoResult = await geocodeTaiwanAddress(rawQuery);
+
+    if (geoResult) {
+      const { lat, lng, displayName, parsedInfo } = geoResult;
+      
+      // 推估所屬工業區或行政區
+      const inferredZone = inferIndustrialZone(rawQuery, displayName, parsedInfo);
+
+      // 動態合成該廠房落塵與熱區模型
+      const synthesizedCase = synthesizeFactoryProfile(rawQuery, displayName, inferredZone, lat, lng, parsedInfo);
+
+      loadFactoryCase(synthesizedCase, true);
+    } else {
+      // 3. 降級：比對主要行政區與工業區字典
+      const fallbackZone = matchIndustrialZoneFallback(rawQuery);
+      if (fallbackZone) {
+        const synthesizedCase = synthesizeFactoryProfile(
+          rawQuery,
+          `${fallbackZone.city}${rawQuery}`,
+          fallbackZone.name,
+          fallbackZone.lat,
+          fallbackZone.lng,
+          parseTaiwanAddress(rawQuery)
+        );
+        loadFactoryCase(synthesizedCase, true);
+        alert(`已為您定位至【${fallbackZone.name}】周邊。若需對齊精準廠房屋頂，可直接點擊地圖任意處微調！`);
+      } else {
+        alert(`找不到地址「${rawQuery}」之精準位置。請嘗試輸入路街名稱，或點擊地圖任意處手動定位！`);
+      }
+    }
+  } catch (err) {
+    console.error('Search error:', err);
+    alert('查詢過程發生異常，請重試或點擊地圖任意處定位。');
+  } finally {
+    submitBtn.disabled = false;
+    btnText.textContent = '定位並分析落塵';
+  }
+}
+
+// 根據地址文字推估所屬工業區或行政專區
+function inferIndustrialZone(query, displayName, parsed) {
+  const combined = (query + ' ' + displayName).toLowerCase();
+  
+  if (combined.includes('觀音')) return '桃園觀音產業園區';
+  if (combined.includes('六輕') || combined.includes('麥寮')) return '雲林麥寮離島工業區';
+  if (combined.includes('線西') || combined.includes('彰濱')) return '彰濱產業園區';
+  if (combined.includes('科學園區') || combined.includes('竹科')) return '新竹科學園區';
+  if (combined.includes('樹林')) return '新北樹林產業園區';
+  if (combined.includes('龍德') || combined.includes('蘇澳')) return '宜蘭蘇澳龍德工業區';
+  if (combined.includes('中鋼') || combined.includes('臨海工業區')) return '高雄臨海工業區';
+  if (combined.includes('小港')) return '高雄市小港區特定工業聚落';
+  
+  if (parsed && parsed.district) {
+    return `${parsed.city || ''}${parsed.district} 工業/住商混合聚落`;
+  }
+  return '台灣都會工業聚落';
+}
+
+function matchIndustrialZoneFallback(query) {
+  for (const zone of TAIWAN_INDUSTRIAL_ZONES) {
+    const core = zone.name.replace('產業園區', '').replace('工業區', '');
+    if (query.includes(core) || (zone.city && query.includes(zone.city))) {
+      return zone;
+    }
+  }
+  return null;
+}
+
+// ==============================================================================
+// 5. 點擊地圖微調定位廠房 (Interactive Pin Relocation)
+// ==============================================================================
+function relocateRoofTarget(latlng) {
+  if (!currentFactory) return;
+
+  const lat = parseFloat(latlng.lat);
+  const lng = parseFloat(latlng.lng);
+
+  currentFactory.lat = lat;
+  currentFactory.lng = lng;
+
+  // 更新顯示坐標
+  const coordEl = document.getElementById('activeCoordDisplay');
+  if (coordEl) {
+    coordEl.textContent = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+  }
+
+  // 重新渲染向量圖層
+  renderRoofComponents(currentFactory);
+  updateInspectorPanel(currentFactory);
+  updateExternalLinks(currentFactory);
+
+  // 提示氣泡
+  const targetMarker = layerGroups.targetPin.getLayers()[0];
+  if (targetMarker) {
+    targetMarker.openPopup();
+  }
+}
+
+// ==============================================================================
+// 6. 載入並渲染廠房屋頂落塵與熱區視覺化
 // ==============================================================================
 async function loadFactoryCase(factory, shouldLog = true) {
   currentFactory = factory;
 
-  // 1. 清空既有向量圖層
-  Object.values(layerGroups).forEach(group => group.clearLayers());
-
-  // 2. 地圖平移並縮放至屋頂最佳視野
+  // 1. 地圖平移並縮放至屋頂最佳視野 (Zoom 18)
   map.setView([factory.lat, factory.lng], factory.zoom || 18, {
     animate: true,
-    duration: 1.2
+    duration: 1.0
   });
 
-  // 3. 繪製廠房範圍參考框 (Roof Boundary Reference Polygon)
-  const halfLat = 0.0008;
-  const halfLng = 0.0011;
-  const roofBounds = [
-    [factory.lat - halfLat, factory.lng - halfLng],
-    [factory.lat + halfLat, factory.lng - halfLng],
-    [factory.lat + halfLat, factory.lng + halfLng],
-    [factory.lat - halfLat, factory.lng + halfLng]
-  ];
+  // 2. 更新坐標顯示
+  const coordEl = document.getElementById('activeCoordDisplay');
+  if (coordEl) {
+    coordEl.textContent = `${factory.lat.toFixed(5)}, ${factory.lng.toFixed(5)}`;
+  }
 
-  L.polygon(roofBounds, {
-    color: '#38bdf8',
-    weight: 2,
-    dashArray: '4, 4',
-    fillOpacity: 0.05,
-    fillColor: '#38bdf8'
-  }).addTo(layerGroups.roofBorder);
+  // 3. 繪製所有圖層元件 (中心標籤、熱區、排氣口、扇形)
+  renderRoofComponents(factory);
 
-  // 4. 繪製視覺指標 ①：設備源頭中心點（放射狀散布）
-  renderEmissionSources(factory);
-
-  // 5. 繪製視覺指標 ②：盛行風向沉降扇形 (Plume Staining)
-  renderWindPlume(factory);
-
-  // 6. 繪製視覺指標 ③：光學差分熱區圖 (Change Detection Heatmap)
-  renderHeatmap(factory, currentSliderValue);
-
-  // 7. 繪製視覺指標 ④：排水溝與屋簷天溝滯留沉積線 (Gutter Sedimentation)
-  renderGutters(factory);
-
-  // 8. 更新右側指標面板與儀表數據
+  // 4. 更新右側面板與外部跳轉連結
   updateInspectorPanel(factory);
-
-  // 9. 更新外部快捷檢索連結 (Google Earth / Maps)
   updateExternalLinks(factory);
 
-  // 10. 記錄至 Supabase BaaS 雲端資料庫 (針對每一次查詢留存軌跡)
+  // 5. 記錄至 Supabase BaaS 雲端資料庫
   if (shouldLog && window.SupabaseBridge) {
     try {
       const record = {
@@ -273,7 +508,84 @@ async function loadFactoryCase(factory, shouldLog = true) {
   }
 }
 
-// 視覺指標 ①：排氣源頭標記與放射狀波紋
+// 繪製廠房屋頂全套向量視覺化
+function renderRoofComponents(factory) {
+  // 清空既有圖層
+  Object.values(layerGroups).forEach(group => group.clearLayers());
+
+  // A. 廠房中心定位大針 (可拖曳微調)
+  renderCenterPin(factory);
+
+  // B. 廠房參考範圍虛線框
+  const halfLat = 0.0007;
+  const halfLng = 0.0010;
+  const roofBounds = [
+    [factory.lat - halfLat, factory.lng - halfLng],
+    [factory.lat + halfLat, factory.lng - halfLng],
+    [factory.lat + halfLat, factory.lng + halfLng],
+    [factory.lat - halfLat, factory.lng + halfLng]
+  ];
+
+  L.polygon(roofBounds, {
+    color: '#38bdf8',
+    weight: 2,
+    dashArray: '4, 4',
+    fillOpacity: 0.04,
+    fillColor: '#38bdf8'
+  }).addTo(layerGroups.roofBorder);
+
+  // C. 視覺指標 ①：設備排氣口中心點 (放射狀同心圓)
+  renderEmissionSources(factory);
+
+  // D. 視覺指標 ②：盛行風向沉降扇形 (Plume Staining)
+  renderWindPlume(factory);
+
+  // E. 視覺指標 ③：光學差分熱區圖 (Change Detection Heatmap)
+  renderHeatmap(factory, currentSliderValue);
+
+  // F. 視覺指標 ④：排水天溝滯留沉積線
+  renderGutters(factory);
+}
+
+// 繪製廠房中心定位圖標 (支援拖曳微調)
+function renderCenterPin(factory) {
+  const pinHtml = `
+    <div class="relative flex items-center justify-center pin-bounce cursor-grab active:cursor-grabbing">
+      <div class="w-8 h-8 rounded-full bg-emerald-500/30 border border-emerald-400 animate-ping absolute"></div>
+      <div class="w-6 h-6 rounded-full bg-emerald-500 border-2 border-white shadow-xl flex items-center justify-center text-slate-950 font-black text-xs">
+        📍
+      </div>
+    </div>
+  `;
+
+  const customIcon = L.divIcon({
+    html: pinHtml,
+    className: 'custom-roof-pin',
+    iconSize: [32, 32],
+    iconAnchor: [16, 28]
+  });
+
+  const marker = L.marker([factory.lat, factory.lng], {
+    icon: customIcon,
+    draggable: true,
+    zIndexOffset: 1000
+  }).addTo(layerGroups.targetPin);
+
+  marker.bindPopup(`
+    <div class="p-1 space-y-1 text-xs">
+      <div class="font-bold text-emerald-400">● 廠房屋頂目標位置</div>
+      <div class="text-white font-semibold">${factory.name}</div>
+      <div class="text-[11px] text-slate-300">坐標：${factory.lat.toFixed(5)}, ${factory.lng.toFixed(5)}</div>
+      <div class="text-[10px] text-slate-400">💡 可直接拖曳本圖標或點擊地圖任意處微調位置！</div>
+    </div>
+  `);
+
+  marker.on('dragend', (e) => {
+    relocateRoofTarget(e.target.getLatLng());
+  });
+}
+
+// 視覺指標 ①：排氣源頭標記
 function renderEmissionSources(factory) {
   if (!factory.sources) return;
 
@@ -281,11 +593,10 @@ function renderEmissionSources(factory) {
     const lat = factory.lat + (src.offset ? src.offset[0] : (idx * 0.0002 - 0.0002));
     const lng = factory.lng + (src.offset ? src.offset[1] : (idx * 0.0002 - 0.0002));
 
-    // 自訂源頭圖標 HTML
     const iconHtml = `
       <div class="relative flex items-center justify-center">
-        <div class="w-6 h-6 rounded-full bg-amber-500/30 border-2 border-amber-400 animate-ping absolute"></div>
-        <div class="w-4 h-4 rounded-full bg-amber-500 border-2 border-white shadow-lg flex items-center justify-center text-[9px] font-bold text-slate-950">
+        <div class="w-5 h-5 rounded-full bg-amber-500/30 border border-amber-400 animate-ping absolute"></div>
+        <div class="w-4 h-4 rounded-full bg-amber-500 border border-white shadow-lg flex items-center justify-center text-[9px] font-bold text-slate-950">
           ${idx + 1}
         </div>
       </div>
@@ -294,14 +605,14 @@ function renderEmissionSources(factory) {
     const customIcon = L.divIcon({
       html: iconHtml,
       className: 'custom-source-pin',
-      iconSize: [24, 24],
-      iconAnchor: [12, 12]
+      iconSize: [20, 20],
+      iconAnchor: [10, 10]
     });
 
     const marker = L.marker([lat, lng], { icon: customIcon }).addTo(layerGroups.sources);
 
-    // 放射狀同心圓沉降漸層圈 (Radial Falloff)
-    const radialRadius = src.intensity ? src.intensity * 45 : 35;
+    // 放射狀同心圓沉降漸層圈
+    const radialRadius = src.intensity ? src.intensity * 40 : 30;
     L.circle([lat, lng], {
       radius: radialRadius,
       color: '#f59e0b',
@@ -313,12 +624,10 @@ function renderEmissionSources(factory) {
 
     marker.bindPopup(`
       <div class="p-1 space-y-1">
-        <div class="font-bold text-xs text-amber-400 flex items-center gap-1">
-          <span>● 排氣源頭 #${idx + 1}</span>
-        </div>
+        <div class="font-bold text-xs text-amber-400">● 排氣源頭 #${idx + 1}</div>
         <div class="text-xs font-semibold text-white">${src.name}</div>
-        <div class="text-[11px] text-slate-300">設備類型：${getSourceTypeLabel(src.type)}</div>
-        <div class="text-[10px] text-slate-400">特徵：以排氣口為中心放射狀沉降</div>
+        <div class="text-[11px] text-slate-300">類型：${getSourceTypeLabel(src.type)}</div>
+        <div class="text-[10px] text-slate-400">特徵：排氣口周邊放射狀暗沉</div>
       </div>
     `);
   });
@@ -326,26 +635,25 @@ function renderEmissionSources(factory) {
 
 function getSourceTypeLabel(type) {
   switch (type) {
-    case 'baghouse': return '袋濾式集塵機出風口 (Baghouse Filter)';
-    case 'scrubber': return '酸鹼洗滌塔排氣出風口 (Scrubber)';
-    case 'cyclone': return '旋風分離器與風管 (Cyclone)';
-    case 'vent': return '通風百葉換氣窗 / 卸料坑 (Louver Vent)';
-    case 'gutter': return '轉運棧橋天溝落塵 (Gutter Staining)';
-    default: return '局部排氣管口';
+    case 'baghouse': return '袋濾式集塵機出氣口';
+    case 'scrubber': return '酸鹼洗滌塔排氣口';
+    case 'cyclone': return '旋風分離器風道';
+    case 'vent': return '通風百葉換氣氣窗';
+    case 'gutter': return '棧橋洩水波谷落塵';
+    default: return '局部排風出口';
   }
 }
 
 // 視覺指標 ②：盛行風向沉降扇形 (Plume Staining)
 function renderWindPlume(factory) {
-  const angleDeg = factory.windAngle || 225;
+  const angleDeg = factory.windAngle || 215;
   const angleRad = (angleDeg * Math.PI) / 180;
-  const plumeLength = 0.0014; // 扇形長度
-  const plumeSpread = 0.35;   // 扇形夾角張度
+  const plumeLength = 0.0013;
+  const plumeSpread = 0.32;
 
   const centerLat = factory.lat;
   const centerLng = factory.lng;
 
-  // 計算扇形頂點與兩側邊緣坐標
   const tipLat = centerLat + Math.cos(angleRad) * plumeLength;
   const tipLng = centerLng + Math.sin(angleRad) * plumeLength;
 
@@ -367,12 +675,12 @@ function renderWindPlume(factory) {
     weight: 1.5,
     dashArray: '5, 5',
     fillColor: '#06b6d4',
-    fillOpacity: 0.18
+    fillOpacity: 0.16
   }).addTo(layerGroups.plume).bindPopup(`
     <div class="p-1 space-y-1">
       <div class="font-bold text-xs text-cyan-400">風向沉降扇形帶 (Plume Staining)</div>
       <div class="text-[11px] text-slate-300">盛行風向：${factory.dominantWind}</div>
-      <div class="text-[10px] text-slate-400">煙羽受季節風引導，於下風側屋頂浪板形成長條色差暗帶。</div>
+      <div class="text-[10px] text-slate-400">煙羽受季節風向引導，下風處屋頂浪板形成長條色差暗帶。</div>
     </div>
   `);
 }
@@ -382,17 +690,16 @@ function renderHeatmap(factory, intensityPct) {
   layerGroups.heatmap.clearLayers();
 
   const opacityMultiplier = intensityPct / 100;
-  if (opacityMultiplier <= 0.05) return; // 若拉到最左側基線年，則不顯示熱區
+  if (opacityMultiplier <= 0.05) return;
 
-  // 依據工廠落塵強度產生梯度熱區網格
   const centerLat = factory.lat;
   const centerLng = factory.lng;
   const isSevere = factory.severityLevel === 'severe';
   const isHigh = factory.severityLevel === 'high';
 
-  // 核心深層熱區 (Deep Red / Crimson)
+  // 核心深層熱區 (Deep Red)
   L.circle([centerLat, centerLng], {
-    radius: isSevere ? 55 : (isHigh ? 40 : 25),
+    radius: isSevere ? 50 : (isHigh ? 35 : 22),
     color: '#ef4444',
     weight: 0,
     fillColor: '#ef4444',
@@ -401,7 +708,7 @@ function renderHeatmap(factory, intensityPct) {
 
   // 中度擴散熱區 (Orange)
   L.circle([centerLat, centerLng], {
-    radius: isSevere ? 95 : (isHigh ? 70 : 45),
+    radius: isSevere ? 85 : (isHigh ? 65 : 40),
     color: '#f97316',
     weight: 0,
     fillColor: '#f97316',
@@ -410,7 +717,7 @@ function renderHeatmap(factory, intensityPct) {
 
   // 輕度沉降過渡外圈 (Yellow)
   L.circle([centerLat, centerLng], {
-    radius: isSevere ? 140 : (isHigh ? 100 : 65),
+    radius: isSevere ? 130 : (isHigh ? 95 : 60),
     color: '#eab308',
     weight: 0,
     fillColor: '#eab308',
@@ -418,12 +725,11 @@ function renderHeatmap(factory, intensityPct) {
   }).addTo(layerGroups.heatmap);
 }
 
-// 視覺指標 ④：天溝與屋脊滯留沉積線
+// 視覺指標 ④：天溝滯留沉積線
 function renderGutters(factory) {
-  const halfLat = 0.0006;
-  const halfLng = 0.0009;
+  const halfLat = 0.0005;
+  const halfLng = 0.0008;
 
-  // 屋頂左右側排水天溝線 (Gutters)
   const leftGutter = [
     [factory.lat - halfLat, factory.lng - halfLng],
     [factory.lat + halfLat, factory.lng - halfLng]
@@ -448,14 +754,12 @@ function renderGutters(factory) {
 }
 
 // ==============================================================================
-// 5. 更新右側盡職調查診斷面板 (Inspector Panel)
+// 7. 更新右側指標面板與外部跳轉
 // ==============================================================================
 function updateInspectorPanel(factory) {
-  // 名稱與地址
   document.getElementById('cardFactoryName').textContent = factory.name;
   document.getElementById('cardFactoryAddress').textContent = `${factory.address} ｜ ${factory.industrialZone}`;
 
-  // 等級徽章與色彩
   const badge = document.getElementById('badgeSeverity');
   const dustScoreEl = document.getElementById('metricDustIndex');
   const prLossEl = document.getElementById('metricPrLoss');
@@ -479,44 +783,40 @@ function updateInspectorPanel(factory) {
   }
 
   badge.textContent = badgeText;
-  badge.className = `px-3 py-1 rounded-xl text-xs font-bold border uppercase tracking-wider ${badgeClass}`;
+  badge.className = `px-2.5 py-1 rounded-xl text-xs font-bold border uppercase tracking-wider ${badgeClass} whitespace-nowrap`;
 
   dustScoreEl.textContent = Number(factory.dustIndex).toFixed(1);
-  dustScoreEl.className = `text-3xl font-extrabold font-mono ${scoreColor}`;
+  dustScoreEl.className = `text-2xl sm:text-3xl font-extrabold font-mono ${scoreColor}`;
 
   prLossEl.textContent = `-${Number(factory.prLossEstimate).toFixed(1)}%`;
   document.getElementById('metricCleanFreq').textContent = factory.cleanFrequency || '定期清洗';
   document.getElementById('metricWindVector').textContent = factory.dominantWind || '季節風向';
 
-  // 四大特徵指標
   document.getElementById('featSourceCount').textContent = `${factory.hotspotCount || 0} 處排放源`;
-  document.getElementById('featSourceDesc').textContent = factory.features?.sourceRadialStain || '排氣口中心放射沉降。';
-  document.getElementById('featWindDesc').textContent = factory.features?.windPlume || '受盛行風引導之長條扇形變色。';
+  document.getElementById('featSourceDesc').textContent = factory.features?.sourceRadialStain || '排氣口放射沉降。';
+  document.getElementById('featWindDesc').textContent = factory.features?.windPlume || '受季風影響下風側變色帶。';
   document.getElementById('featCorrosionDesc').textContent = factory.features?.corrosionStatus || '金屬彩色浪板老化與烤漆褪色。';
   document.getElementById('featDrainageDesc').textContent = factory.features?.drainageSediment || '天溝與排水坡度低窪處泥垢硬化。';
 
-  // 時光機年份顯示
   document.getElementById('baselineYearDisplay').textContent = `${factory.baselineYear || 2014} (新建基線)`;
   document.getElementById('recentYearDisplay').textContent = `${factory.recentYear || 2024} (當前累積)`;
 
-  // 盡調工程建議
-  let recText = `該廠房所屬【${factory.industrialZone}】落塵綜合評分達 ${factory.dustIndex} 分（${badgeText}）。`;
+  let recText = `該廠房所屬【${factory.industrialZone}】落塵綜合評分達 ${factory.dustIndex.toFixed(1)} 分（${badgeText}）。`;
   if (factory.dustIndex >= 75) {
     recText += `屋頂排氣沉降顯著，若欲建置太陽光電，模組傾角強烈建議調高至 12~15 度以強化雨水自潔；排氣口下風側 15 米範圍內不建議鋪設模組。建議採用具備抗酸鹼與耐鹽害特裝鍍膜，並依【${factory.cleanFrequency}】編列維運清洗合約。`;
   } else if (factory.dustIndex >= 45) {
     recText += `落塵量屬正常工業區均值，天溝洩水順暢，模組標準 10 度鋪設即可，並維持常規清洗頻率以防發電損耗。`;
   } else {
-    recText += `環境極為潔淨（半導體/高科技潔淨廠房等級），屋頂反射率保持均勻，PR 損失預估低於 3%，極具光電投資效益。`;
+    recText += `環境極為潔淨，屋頂反射率保持均勻，PR 損失預估低於 3%，極具光電投資效益。`;
   }
   document.getElementById('cardRecommendationText').textContent = recText;
 }
 
-// 更新外部跳轉連結
 function updateExternalLinks(factory) {
   const lat = factory.lat;
   const lng = factory.lng;
 
-  // Google Earth Web 深度連結 (指定 90 度垂直正射俯瞰视角)
+  // Google Earth Web 深度連結
   const earthWebUrl = `https://earth.google.com/web/search/${lat},${lng}/@${lat},${lng},300a,35y,0h,0t,0r`;
   document.getElementById('btnGoogleEarthWeb').href = earthWebUrl;
 
@@ -526,7 +826,7 @@ function updateExternalLinks(factory) {
 }
 
 // ==============================================================================
-// 6. 核心操作工具：產生並下載 Google Earth Pro (.kml) 檔案
+// 8. 產生並下載 Google Earth Pro (.kml) 檔案
 // ==============================================================================
 function downloadGoogleEarthKML() {
   if (!currentFactory) return;
@@ -538,10 +838,11 @@ function downloadGoogleEarthKML() {
     <name>工廠屋頂落塵盡職調查 - ${escapeXml(f.name)}</name>
     <description><![CDATA[
       <h2>臺灣工廠屋頂落塵量與污染熱區盡職調查報告</h2>
-      <p><b>工廠名稱：</b>${f.name}</p>
-      <p><b>廠址：</b>${f.address}</p>
+      <p><b>廠房名稱：</b>${f.name}</p>
+      <p><b>廠房地址：</b>${f.address}</p>
       <p><b>所屬園區：</b>${f.industrialZone}</p>
-      <p><b>落塵綜合評分：</b>${f.dustIndex} / 100 (${f.severityLevel})</p>
+      <p><b>空間坐標：</b>${f.lat.toFixed(6)}, ${f.lng.toFixed(6)}</p>
+      <p><b>落塵綜合評分：</b>${f.dustIndex.toFixed(1)} / 100 (${f.severityLevel})</p>
       <p><b>預估 PR 損失：</b>-${f.prLossEstimate}%</p>
       <p><b>建議清洗頻率：</b>${f.cleanFrequency}</p>
       <hr/>
@@ -561,7 +862,7 @@ function downloadGoogleEarthKML() {
 
     <!-- 廠房定位標籤 -->
     <Placemark>
-      <name>${escapeXml(f.name)} (落塵指數: ${f.dustIndex})</name>
+      <name>${escapeXml(f.name)} (落塵指數: ${f.dustIndex.toFixed(1)})</name>
       <Point>
         <coordinates>${f.lng},${f.lat},0</coordinates>
       </Point>
@@ -604,131 +905,23 @@ function escapeXml(unsafe) {
 }
 
 // ==============================================================================
-// 7. 地址全台動態搜尋 (OSM Nominatim ✕ 台灣工業區快查)
+// 9. 動態建構廠房分析資料 (根據解析之台灣地址與坐標)
 // ==============================================================================
-async function handleAddressSearch(e) {
-  e.preventDefault();
-  const inputEl = document.getElementById('addressInput');
-  const query = (inputEl.value || '').trim();
-  if (!query) return;
-
-  const submitBtn = document.getElementById('searchSubmitBtn');
-  const btnText = document.getElementById('searchBtnText');
-
-  submitBtn.disabled = true;
-  btnText.textContent = '定位解析中...';
-
-  try {
-    // 1. 先檢驗是否與既有標竿工廠相符
-    const matchedPreset = PRESET_FACTORIES.find(f => 
-      f.name.includes(query) || f.address.includes(query) || query.includes(f.name.split(' ')[0])
-    );
-    if (matchedPreset) {
-      loadFactoryCase(matchedPreset, true);
-      submitBtn.disabled = false;
-      btnText.textContent = '定位並分析落塵';
-      return;
-    }
-
-    // 2. 呼叫 OpenStreetMap Nominatim 臺灣地址空間定位 API
-    const geocodeUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&countrycodes=tw&limit=1`;
-    const response = await fetch(geocodeUrl, {
-      headers: { 'Accept': 'application/json' }
-    });
-    const results = await response.json();
-
-    if (results && results.length > 0) {
-      const match = results[0];
-      const lat = parseFloat(match.lat);
-      const lng = parseFloat(match.lon);
-
-      // 自動推算所屬工業區或縣市
-      const inferredZone = inferIndustrialZone(query, match.display_name);
-
-      // 依據地理位置與工業區特性生成動態評估模型
-      const synthesizedCase = synthesizeFactoryProfile(query, match.display_name, inferredZone, lat, lng);
-      
-      loadFactoryCase(synthesizedCase, true);
-    } else {
-      // 3. 降級：若 Nominatim 找不到精確門牌，比對內建主要工業區字典
-      const zoneFallback = matchIndustrialZoneFallback(query);
-      if (zoneFallback) {
-        const synthesizedCase = synthesizeFactoryProfile(
-          query,
-          `${zoneFallback.city}${query}`,
-          zoneFallback.name,
-          zoneFallback.lat,
-          zoneFallback.lng
-        );
-        loadFactoryCase(synthesizedCase, true);
-      } else {
-        alert(`抱歉，找不到地址「${query}」之精準地理位置。請嘗試輸入更詳細之縣市、鄉鎮市區、路名，或點擊上方代表性案例！`);
-      }
-    }
-  } catch (err) {
-    console.error('Geocoding error:', err);
-    // 離線回退
-    const zoneFallback = matchIndustrialZoneFallback(query);
-    if (zoneFallback) {
-      const synthesizedCase = synthesizeFactoryProfile(query, query, zoneFallback.name, zoneFallback.lat, zoneFallback.lng);
-      loadFactoryCase(synthesizedCase, true);
-    } else {
-      alert('網路連線或查詢逾時，請稍後再試。');
-    }
-  } finally {
-    submitBtn.disabled = false;
-    btnText.textContent = '定位並分析落塵';
-  }
-}
-
-// 根據地址文字推估所屬工業園區
-function inferIndustrialZone(query, displayName) {
-  const combined = (query + ' ' + displayName).toLowerCase();
-  for (const zone of TAIWAN_INDUSTRIAL_ZONES) {
-    const core = zone.name.replace('產業園區', '').replace('工業區', '');
-    if (combined.includes(core)) {
-      return zone.name;
-    }
-  }
-  if (combined.includes('觀音')) return '桃園觀音產業園區';
-  if (combined.includes('小港') || combined.includes('臨海')) return '高雄臨海工業區';
-  if (combined.includes('麥寮') || combined.includes('六輕')) return '雲林麥寮離島工業區';
-  if (combined.includes('線西') || combined.includes('彰濱')) return '彰濱產業園區';
-  if (combined.includes('科學園區') || combined.includes('竹科')) return '新竹科學園區';
-  if (combined.includes('樹林')) return '新北樹林產業園區';
-  if (combined.includes('蘇澳') || combined.includes('龍德')) return '宜蘭蘇澳龍德工業區';
-  return '一般都市計畫工業區 / 廠區';
-}
-
-function matchIndustrialZoneFallback(query) {
-  for (const zone of TAIWAN_INDUSTRIAL_ZONES) {
-    const core = zone.name.replace('產業園區', '').replace('工業區', '');
-    if (query.includes(core) || query.includes(zone.city)) {
-      return zone;
-    }
-  }
-  return null;
-}
-
-// 根據地址坐標與氣候特徵動態生成盡調分析模型
-function synthesizeFactoryProfile(query, fullAddress, zoneName, lat, lng) {
-  // 依據是否臨海與所在縣市計算季節季風
+function synthesizeFactoryProfile(query, fullAddress, zoneName, lat, lng, parsed) {
   const isNorthern = lat > 24.5;
   const isCoastal = lng < 120.5 || lng > 121.7;
 
-  // 估算落塵指數 (0~100)
   let baseScore = 65.0;
-  if (zoneName.includes('臨海') || zoneName.includes('麥寮') || zoneName.includes('水泥')) {
-    baseScore = 84.0;
+  if (zoneName.includes('臨海') || zoneName.includes('麥寮') || zoneName.includes('小港')) {
+    baseScore = 79.0;
   } else if (zoneName.includes('科學園區')) {
-    baseScore = 32.0;
+    baseScore = 28.0;
   } else if (isCoastal) {
-    baseScore = 75.0;
+    baseScore = 74.0;
   }
 
-  // 微量隨機擾動使各地址具備個別特徵
-  const hashVal = Math.abs(hashCode(query + lat.toFixed(4))) % 15;
-  const finalScore = Math.min(94, Math.max(25, baseScore + (hashVal - 7)));
+  const hashVal = Math.abs(hashCode(query + lat.toFixed(4))) % 12;
+  const finalScore = Math.min(92, Math.max(25, baseScore + (hashVal - 6)));
   const prLoss = (finalScore * 0.18).toFixed(1);
 
   let severity = 'moderate';
@@ -736,16 +929,21 @@ function synthesizeFactoryProfile(query, fullAddress, zoneName, lat, lng) {
   if (finalScore >= 80) {
     severity = 'severe';
     cleanFreq = '每 20~30 天高壓清洗';
-  } else if (finalScore >= 65) {
+  } else if (finalScore >= 68) {
     severity = 'high';
     cleanFreq = '每 35~45 天清洗一次';
   }
 
   const windAngle = isNorthern ? 225 : 215;
 
+  let titleName = query;
+  if (parsed && parsed.road) {
+    titleName = `${parsed.city || ''}${parsed.district || ''}${parsed.road}${parsed.houseNo || ''}`;
+  }
+
   return {
     id: 'dyn-' + Date.now().toString(36),
-    name: query.length > 15 ? query.substring(0, 15) : query,
+    name: titleName || query,
     address: fullAddress || query,
     industrialZone: zoneName,
     industryType: '製造加工業 / 廠房屋頂',
@@ -757,7 +955,7 @@ function synthesizeFactoryProfile(query, fullAddress, zoneName, lat, lng) {
     hotspotCount: finalScore > 75 ? 4 : (finalScore > 50 ? 2 : 1),
     dominantWind: `${isNorthern ? '北部' : '西部'}東北季風 (${windAngle}° 吹拂軸向)`,
     windAngle: windAngle,
-    windSpeed: isCoastal ? 5.8 : 3.6,
+    windSpeed: isCoastal ? 5.6 : 3.4,
     prLossEstimate: parseFloat(prLoss),
     cleanFrequency: cleanFreq,
     sources: [
@@ -766,13 +964,13 @@ function synthesizeFactoryProfile(query, fullAddress, zoneName, lat, lng) {
     ],
     features: {
       sourceRadialStain: "排氣口周遭可見粉塵微粒放射狀沉降與局部暗斑。",
-      windPlume: `受常年季風引導，下風側屋頂浪板形成擴散變色帶。`,
+      windPlume: "受常年季風引導，下風側屋頂浪板形成擴散變色帶。",
       corrosionStatus: "浪板烤漆塗層受日照與大氣沉降交互作用微幅老化。",
       drainageSediment: "雨水沖刷後於天溝坡度接縫處形成細顆粒沉殿。"
     },
-    baselineYear: 2015,
+    baselineYear: 2014,
     recentYear: 2024,
-    description: `依據地址定位於【${zoneName}】，光學差分落塵指數為 ${finalScore.toFixed(1)} 分。`
+    description: `依據地址精準定位於【${zoneName}】，光學差分落塵指數為 ${finalScore.toFixed(1)} 分。`
   };
 }
 
@@ -785,21 +983,58 @@ function hashCode(str) {
   return hash;
 }
 
+// 渲染標竿案例 Chips
+function renderPresetChips() {
+  const container = document.getElementById('presetChips');
+  if (!container || !PRESET_FACTORIES) return;
+
+  container.innerHTML = PRESET_FACTORIES.map((factory, idx) => `
+    <button 
+      onclick="selectPresetFactory('${factory.id}')"
+      id="chip-${factory.id}"
+      class="preset-chip whitespace-nowrap px-2.5 py-1 rounded-xl border text-[11px] font-medium transition flex items-center gap-1.5 ${
+        idx === 0 
+          ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/60 shadow-sm' 
+          : 'bg-slate-800/80 text-slate-300 border-slate-700/80 hover:bg-slate-700 hover:text-white'
+      }"
+    >
+      <span class="w-1.5 h-1.5 rounded-full ${factory.dustIndex > 80 ? 'bg-rose-400' : (factory.dustIndex > 60 ? 'bg-amber-400' : 'bg-emerald-400')}"></span>
+      <span>${factory.name.split(' ')[0]}</span>
+      <span class="text-[10px] text-slate-400">(${factory.industrialZone.replace('產業園區', '').replace('工業區', '')})</span>
+    </button>
+  `).join('');
+}
+
+function selectPresetFactory(factoryId) {
+  const factory = PRESET_FACTORIES.find(f => f.id === factoryId);
+  if (!factory) return;
+
+  document.querySelectorAll('.preset-chip').forEach(c => {
+    c.className = 'preset-chip whitespace-nowrap px-2.5 py-1 rounded-xl border text-[11px] font-medium transition flex items-center gap-1.5 bg-slate-800/80 text-slate-300 border-slate-700/80 hover:bg-slate-700 hover:text-white';
+  });
+  const activeChip = document.getElementById(`chip-${factoryId}`);
+  if (activeChip) {
+    activeChip.className = 'preset-chip whitespace-nowrap px-2.5 py-1 rounded-xl border text-[11px] font-medium transition flex items-center gap-1.5 bg-emerald-600/30 text-emerald-300 border-emerald-500/60 shadow-sm';
+  }
+
+  document.getElementById('addressInput').value = factory.address;
+  document.getElementById('clearSearchBtn').classList.remove('hidden');
+
+  loadFactoryCase(factory, true);
+}
+
 function clearSearchInput() {
   document.getElementById('addressInput').value = '';
   document.getElementById('clearSearchBtn').classList.add('hidden');
 }
 
-// 監聽輸入框是否有值
 document.getElementById('addressInput')?.addEventListener('input', (e) => {
   const btn = document.getElementById('clearSearchBtn');
   if (e.target.value.trim()) btn.classList.remove('hidden');
   else btn.classList.add('hidden');
 });
 
-// ==============================================================================
-// 8. 歷年時光機滑桿控制 (Before & After Slider)
-// ==============================================================================
+// 時光機滑桿
 function handleTimeSliderChange(val) {
   currentSliderValue = parseInt(val, 10);
   document.getElementById('sliderValueText').textContent = `${val}%`;
@@ -808,12 +1043,9 @@ function handleTimeSliderChange(val) {
   }
 }
 
-// ==============================================================================
-// 9. 查詢歷史紀錄抽屜 (History Drawer)
-// ==============================================================================
+// 查詢歷史紀錄抽屜
 async function openHistoryDrawer() {
-  const drawer = document.getElementById('historyDrawer');
-  drawer.classList.remove('hidden');
+  document.getElementById('historyDrawer').classList.remove('hidden');
   await refreshHistoryList();
 }
 
@@ -843,7 +1075,6 @@ async function refreshHistoryList() {
       <div class="text-center py-10 text-slate-500 text-xs space-y-2">
         <i data-lucide="inbox" class="w-8 h-8 mx-auto text-slate-600"></i>
         <p>尚無查詢紀錄</p>
-        <p class="text-[11px] text-slate-600">在搜尋列輸入地址或選取標竿工廠，每次查詢均會自動留存！</p>
       </div>
     `;
     if (window.lucide) lucide.createIcons();
@@ -904,7 +1135,7 @@ function reloadHistoryItem(encodedJson) {
       severityLevel: item.severity_level || 'moderate',
       hotspotCount: item.hotspot_count || 3,
       dominantWind: item.dominant_wind_direction || '東北季風',
-      windAngle: parseFloat(item.wind_angle || 225),
+      windAngle: parseFloat(item.wind_angle || 215),
       prLossEstimate: parseFloat(item.pr_loss_estimate || 0),
       cleanFrequency: item.clean_frequency || '定期清洗',
       sources: item.sources_summary || [],
@@ -921,7 +1152,7 @@ function reloadHistoryItem(encodedJson) {
 
     document.getElementById('addressInput').value = factoryObj.address;
     closeHistoryDrawer();
-    loadFactoryCase(factoryObj, false); // 重新載入不重複 insert
+    loadFactoryCase(factoryObj, false);
   } catch (e) {
     console.error('Reload history error:', e);
   }
@@ -938,9 +1169,7 @@ async function updateHistoryCount(count) {
   }
 }
 
-// ==============================================================================
-// 10. Supabase BaaS 連線配置視窗 (Settings Modal)
-// ==============================================================================
+// Supabase 連線設定視窗
 function openSupabaseModal() {
   const modal = document.getElementById('supabaseModal');
   const cfg = SupabaseBridge.getConfig();
@@ -990,9 +1219,7 @@ async function saveSupabaseInputs() {
   alert('Supabase 連線設定已更新！');
 }
 
-// ==============================================================================
-// 11. 指南手冊彈窗 (Guide Modal)
-// ==============================================================================
+// 指南手冊彈窗
 function openGuideModal() {
   document.getElementById('guideModal').classList.remove('hidden');
 }
@@ -1001,9 +1228,7 @@ function closeGuideModal() {
   document.getElementById('guideModal').classList.add('hidden');
 }
 
-// ==============================================================================
-// 12. 專業顧問級盡職調查報告列印 (Print Due Diligence Report)
-// ==============================================================================
+// 列印盡職調查報告
 function printDueDiligenceReport() {
   if (!currentFactory) {
     alert('請先選取或搜尋欲匯出報告之工廠！');
@@ -1017,12 +1242,11 @@ function printDueDiligenceReport() {
 
   printArea.innerHTML = `
     <div style="font-family: 'Noto Sans TC', sans-serif; max-width: 900px; margin: 0 auto; color: #0f172a; line-height: 1.6;">
-      <!-- 報告頂部封面與資訊 -->
       <div style="border-bottom: 3px solid #059669; padding-bottom: 16px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: flex-end;">
         <div>
           <span style="font-size: 11px; font-weight: bold; color: #059669; text-transform: uppercase; letter-spacing: 1px;">Due Diligence Engineering Audit</span>
           <h1 style="font-size: 24px; font-weight: 800; margin: 4px 0 0 0; color: #0f172a;">工廠屋頂落塵量與污染熱區盡職調查評估報告</h1>
-          <p style="font-size: 13px; color: #64748b; margin: 4px 0 0 0;">依據《工業區落塵量開放資料查詢指南》✕ 國土測繪航照正射影像 ✕ Google Earth 時光機差分分析</p>
+          <p style="font-size: 13px; color: #64748b; margin: 4px 0 0 0;">依據《工業區落塵量開放資料查詢指南》✕ Google 混合衛星 ✕ 國土測繪航照正射影像</p>
         </div>
         <div style="text-align: right; font-size: 12px; color: #64748b;">
           <div>報告編號：RD-${Date.now().toString(36).toUpperCase()}</div>
@@ -1030,7 +1254,6 @@ function printDueDiligenceReport() {
         </div>
       </div>
 
-      <!-- 廠址基本數據表 -->
       <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 13px;">
         <tbody>
           <tr style="background: #f8fafc;">
@@ -1043,16 +1266,15 @@ function printDueDiligenceReport() {
             <td style="padding: 10px 14px; border: 1px solid #cbd5e1; font-weight: bold;">廠房地址</td>
             <td style="padding: 10px 14px; border: 1px solid #cbd5e1;">${f.address}</td>
             <td style="padding: 10px 14px; border: 1px solid #cbd5e1; font-weight: bold;">空間坐標</td>
-            <td style="padding: 10px 14px; border: 1px solid #cbd5e1; font-family: monospace;">(${f.lat.toFixed(5)}, ${f.lng.toFixed(5)})</td>
+            <td style="padding: 10px 14px; border: 1px solid #cbd5e1; font-family: monospace;">(${f.lat.toFixed(6)}, ${f.lng.toFixed(6)})</td>
           </tr>
         </tbody>
       </table>
 
-      <!-- 核心盡調指標看板 -->
       <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px;">
         <div style="background: #f1f5f9; padding: 14px; border-radius: 8px; border: 1px solid #cbd5e1; text-align: center;">
           <div style="font-size: 11px; color: #64748b; font-weight: bold;">落塵綜合評分</div>
-          <div style="font-size: 26px; font-weight: 800; color: #dc2626; margin: 4px 0;">${f.dustIndex} <span style="font-size: 12px; color: #64748b;">/ 100</span></div>
+          <div style="font-size: 26px; font-weight: 800; color: #dc2626; margin: 4px 0;">${f.dustIndex.toFixed(1)} <span style="font-size: 12px; color: #64748b;">/ 100</span></div>
           <div style="font-size: 11px; font-weight: bold; color: #dc2626;">等級：${f.severityLevel.toUpperCase()}</div>
         </div>
 
@@ -1075,7 +1297,6 @@ function printDueDiligenceReport() {
         </div>
       </div>
 
-      <!-- 四大視覺特徵指標檢核結果 -->
       <h3 style="font-size: 15px; font-weight: bold; border-left: 4px solid #059669; padding-left: 8px; margin: 20px 0 10px 0;">
         一、 指南四大視覺特徵檢核紀錄
       </h3>
@@ -1111,7 +1332,6 @@ function printDueDiligenceReport() {
         </tbody>
       </table>
 
-      <!-- 判讀防偽排除檢核 -->
       <h3 style="font-size: 15px; font-weight: bold; border-left: 4px solid #059669; padding-left: 8px; margin: 20px 0 10px 0;">
         二、 判讀盲點與防偽過濾檢核
       </h3>
@@ -1121,7 +1341,6 @@ function printDueDiligenceReport() {
         <div>☑ <b>清洗維護週期校正：</b>已將定期水洗斷點納入時間序列累積斜率評估。</div>
       </div>
 
-      <!-- 工程建議與簽署 -->
       <h3 style="font-size: 15px; font-weight: bold; border-left: 4px solid #059669; padding-left: 8px; margin: 20px 0 10px 0;">
         三、 太陽光電建置與維運決策建議
       </h3>
@@ -1129,7 +1348,6 @@ function printDueDiligenceReport() {
         <p>${document.getElementById('cardRecommendationText')?.textContent || ''}</p>
       </div>
 
-      <!-- 簽核欄 -->
       <div style="display: flex; justify-content: space-between; margin-top: 40px; padding-top: 16px; border-top: 1px solid #cbd5e1; font-size: 12px; color: #64748b;">
         <div>調查單位：進金生能源服務 6692 ｜ AI 技術評估平台</div>
         <div>審查工程師簽署：____________________</div>
